@@ -1,0 +1,27 @@
+ {
+"name" : "Cinderella",
+"PEs" : 
+	{
+	"0" : "PE_mem.json",
+	"1" : "PE_mem.json",
+	"2" : "PE_mem.json",
+	"3" : "PE_mem.json"
+	},
+<<<<<<< HEAD
+"Context_memory_size" : 1024,
+=======
+"Context_memory_size" : 512,
+>>>>>>> cache
+"Interconnect" : "Interconnect_4pe_mesh.json",
+"CBox_slots" : 32,
+
+"CacheConfig" : "config/FU/Cache/Cache.json",
+"htCacheConfig" : "config/FU/Cache/HTCache.json",
+
+"staticEnergy" : 0.2,
+	"SENDLOCALVAR" :					{"energy": 1.3, "duration": 1},
+	"RUN" :           					{"energy": 1.3, "duration": 1},
+	"WRITECONTEXT" :           			{"energy": 1.3, "duration": 1},
+	"RECEIVELOCALVAR" :					{"energy": 1.3, "duration": 1}
+
+}

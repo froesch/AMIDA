@@ -1,0 +1,13 @@
+{
+	"UNROLL" 				: 4,
+	"SYNTHLOG" 				: true,
+	"MAX_UNROLL_LENGTH" 	: 3000,
+	"CSE"					: true,
+	"CONSTANT_FOLDING"		: false,	
+	"INLINE"				: true,
+	"ALIASING_SPECULATION"	: "PESSIMISTIC_CHECK",
+	
+	"BLACKLIST"			: [
+		{"java/lang/String.equals(Ljava/lang/Object;)Z":75},
+	]
+}

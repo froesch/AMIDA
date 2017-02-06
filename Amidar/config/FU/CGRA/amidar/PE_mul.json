@@ -1,0 +1,11 @@
+{
+	"name"  : "PE_TYPE_adder",
+	"IADD"  : {"energy": 1.100000,"duration": 1},
+	"LOAD"  : {"energy": 2.200000,"duration": 1},
+	"STORE" : {"energy": 1.100000,"duration": 1},
+	"IMUL" : {"energy": 1.100000,"duration": 2},
+	"NOP"   : {"energy": 0.70000, "duration": 1},
+"IFEQ"      : {"energy": 1.100000,"duration": 1},
+	"IFNE"      : {"energy": 1.100000,"duration": 1},
+	"Regfile_size" : 16
+}

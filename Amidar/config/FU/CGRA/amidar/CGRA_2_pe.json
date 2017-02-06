@@ -1,0 +1,11 @@
+ {
+"name" : "CGRA_single_pe_vn",
+"PEs" : 
+	{
+	"0" : "config/amidar/PE_all_int_ops.json",
+	"1" : "config/amidar/PE_all_int_ops_no_mem.json",
+	},
+"Context_memory_size" : 1024,
+"Interconnect" : "config/amidar/Interconnect_2_pe_mesh.json",
+"CBox_slots" : 32
+}

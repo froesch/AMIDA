@@ -1,0 +1,16 @@
+{
+	"name" 					: "AMIDAR",
+	
+	"HEAP" 					: "config/FU/Heap.json",
+	"FALU" 					: "config/FU/Falu.json",
+	"IALU" 					: "config/FU/Ialu.json",
+	"TOKENMACHINE"			: "config/FU/TokenMachine.json",
+	"FRAMESTACK"            : "config/FU/FrameStack.json",
+<<<<<<< HEAD
+	"CGRA" 					: "config/FU/CGRA/CGRA_16.json",
+=======
+	"CGRA" 					: "../cgra/CGRA/config/amidar/CGRA_16.json",
+>>>>>>> origin/newgenerator
+	"trace_activation"		: "config/trace.json", 
+	"synthesis" 			: "config/synthesis.json"
+}

@@ -1,0 +1,20 @@
+{
+	"config"		: true,
+	"synthesis" 	: true,
+
+	"ticks"			: false,
+	"tokens" 		: false,
+	"execute" 		: false,
+	"packets" 		: false,
+	"methods"		: false,
+	"system"		: true,
+	
+	"heap"			: false,
+<<<<<<< HEAD
+	"caches"		: false,
+=======
+	"caches"		: true,
+>>>>>>> cache
+
+	"results" 		: true,
+}

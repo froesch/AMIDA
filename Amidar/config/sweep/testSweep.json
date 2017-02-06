@@ -1,0 +1,37 @@
+{
+"parameter" : 
+	{
+	"UNROLL" : [1,2,3,4,5]
+	},
+"application" :
+	[
+		"de/amidar/ADPCMn",
+	
+		"de/amidar/crypto/AESTest_correctness",
+		"de/amidar/crypto/DESedeTest_correctness",
+		"de/amidar/crypto/BlowfishTest_correctness",
+		"de/amidar/crypto/IDEATest_correctness",
+		"de/amidar/crypto/RC6Test_correctness",
+		"de/amidar/crypto/SerpentTest_correctness",
+		"de/amidar/crypto/SkipjackTest_correctness",
+		"de/amidar/crypto/TwofishTest_correctness",
+		"de/amidar/crypto/XTEATest_correctness",
+
+		"de/amidar/digests/BLAKE256Test_correctness",
+		"de/amidar/digests/CubeHash512Test_correctness",
+		"de/amidar/digests/ECOH256Test_correctness",
+		"de/amidar/digests/MD5Test_correctness",
+		"de/amidar/digests/RadioGatun32Test_correctness",
+		"de/amidar/digests/SHA1Test_correctness",
+		"de/amidar/digests/SHA256Test_correctness",
+		"de/amidar/digests/SIMD512Test_correctness",
+
+		"de/amidar/filter/ContrastFilterTest_pixel_correctness",
+		"de/amidar/filter/GrayscaleFilterTest_pixel_correctness",
+		"de/amidar/filter/SobelFilterTest_pixel_correctness",
+		"de/amidar/filter/SwizzleFilterTest_pixel_correctness",
+
+		"net/spy/photo/JpegEncode_correctness"
+	]
+
+}

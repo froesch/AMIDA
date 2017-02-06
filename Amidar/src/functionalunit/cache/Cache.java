@@ -1,0 +1,846 @@
+package functionalunit.cache;
+
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
+
+import exceptions.AmidarSimulatorException;
+import functionalunit.ObjectHeap;
+import tracer.Trace;
+import tracer.TraceManager;
+
+/**
+ * Datacache, currently used by Heap and CGRA
+ * @author Patrick Appenheimer
+ *
+ */
+public class Cache{	
+	
+	//For debugging purposes only
+	//true:		tag = {handle,offset[31:3],000}
+	//false:	old tag generation
+	private static final boolean NEW_CACHE_ADDR = true;	
+	
+	private int CACHESIZE;
+	private int SETS;
+	private int WORDSPERLINE;
+	private int BYTESPERWORD;
+	private int CACHELINES;
+	
+	private boolean wrAlloc;	//TODO
+	private boolean wrBack;		//TODO
+	
+	private int extMemAcc;
+	
+	private int[] plru;
+	private CacheLine[][] cache; 
+	
+	private long tag;
+	private int index;
+	private int blockoffset;
+	
+	private int handle;
+	private int offset;
+	
+	private int data;
+	
+//	private ObjectHeap heap;
+	private Memory memory;
+	private HandleTableCache htCache;
+	
+	private int cacheID;
+	public int getCacheID(){
+		return cacheID;
+	}
+	private boolean isHeapCache;
+			
+	private boolean synthesis;
+	
+	private Cache[] moesiCaches;
+	private int getFromCache;
+	private int extCacheSet;
+	private int returnSet;
+	
+	private int [] replaced;
+	
+	//======================================== TRACE =========================================
+	//==== 0=totalRead / 1=totalWrite / 2=readMiss / 3=readHit / 4=writeMiss / 5=writeHit ====
+	//====   6=fromCache[read] / 7=fromCache[write] / 8=fromMem[read] / 9=fromMem[write]  ====
+	//====   10=tagButInvalid[read] / 11=tagButInvalid[write] / 12=cachelineUpdates       ====
+	private int[] statistics;
+	
+	private TraceManager traceManager;
+
+	//======= MOESI States =======
+	public static enum MOESIState{
+		INVALID,
+		SHARED,
+		EXCLUSIVE,
+		OWNED,
+		MODIFIED;
+	}
+	
+	public Cache(Memory memory, String configFile, int cacheID, boolean synthesis, TraceManager traceManager){
+		this.configureCache(configFile);
+		this.plru = new int[CACHELINES];
+		this.cache = new CacheLine[CACHELINES][SETS];
+		this.replaced = new int[CACHELINES];
+		this.memory = memory;
+		htCache = new HandleTableCache(this, memory, configFile);
+		this.createCacheLines();
+		this.synthesis = synthesis;
+		this.cacheID = cacheID;
+		statistics = new int[13];
+		this.traceManager = traceManager;
+		if(cacheID==99){
+			isHeapCache=true;
+			this.cacheID=0;
+		}
+	}
+	
+	private void createCacheLines(){
+		for(int i = 0; i < CACHELINES; i++){
+			for(int j = 0; j < SETS; j++){
+				cache[i][j] = new CacheLine(WORDSPERLINE);
+			}
+		}
+	}
+	
+	private void configureCache(String configFile){
+		if(configFile == null) System.err.println("No Config File");
+		JSONParser parser = new JSONParser();
+		FileReader fileReader;
+		JSONObject json = null;
+		try {
+			fileReader = new FileReader(configFile);
+			json = (JSONObject) parser.parse(fileReader);
+			String cacheConfig = (String) json.get("CacheConfig");
+			if(cacheConfig == null) System.err.println("No Cache Config File");
+			fileReader = new FileReader(cacheConfig);
+			json = (JSONObject) parser.parse(fileReader);
+		} catch (FileNotFoundException e) {
+			System.err.println("No Config File found");
+			e.printStackTrace();
+		} catch (IOException e) {
+			System.err.println("Error while reading config file");
+			e.printStackTrace();
+		} catch (ParseException e) {
+			System.err.println("Error while reading config file");
+			e.printStackTrace();
+		}		
+		long size = (long) json.get("size");
+		CACHESIZE = ((int) size) * 1024;
+		long sets = (long) json.get("sets");
+		SETS = (int) sets;
+		long wordsperline = (long) json.get("wordsperline");
+		WORDSPERLINE = (int) wordsperline;
+		BYTESPERWORD = 4;
+		CACHELINES = (CACHESIZE/SETS)/(BYTESPERWORD*WORDSPERLINE);
+		wrAlloc = (boolean) json.get("wrAlloc");
+		wrBack = (boolean) json.get("wrBack");
+		long extMem = (long) json.get("extMemoryAccTicks");
+		extMemAcc = (int) extMem;
+		}
+	
+	public int requestData(int handle, int offset) {
+		statistics[0]++;
+		if(!isHeapCache){
+			if(offset == Integer.MAX_VALUE){
+				htCache.requestData(handle);
+				data = htCache.getSize();
+				return 0;
+			}
+			if(offset == Integer.MAX_VALUE-1){
+				htCache.requestData(handle);
+				data = htCache.getCTI();
+				return 0;
+			}
+		}
+		int selMask = generateCacheAddr(handle, offset);
+		if(selMask == 99) throw new AmidarSimulatorException("ObjCache.requestData() says: \"No valid selMask!\"");
+		boolean foundTag = false;
+		for(int i = 0; i<SETS; i++){
+			if(cache[index][i].getTag() == tag){
+				if(cache[index][i].getMoesiState() != MOESIState.INVALID){
+					statistics[3]++;
+					data = cache[index][i].getData(blockoffset);
+					setPLRU(index, i);
+					return 0;
+				}
+				foundTag=true;
+			}
+		}
+		if(foundTag) statistics[10]++;
+		statistics[2]++;
+		int ticks = 1;
+		int replaceInSet = decisionPLRU(index);
+		if(replaceInSet == 99) throw new AmidarSimulatorException("Something went wrong with the PLRU decision");
+		MOESIState tempMoesi = cache[index][replaceInSet].getMoesiState();
+		if(tempMoesi == MOESIState.OWNED || tempMoesi == MOESIState.MODIFIED){
+			this.generateHandleOffset(cache[index][replaceInSet].getTag(), index, 0, cache[index][replaceInSet].getSelMask());
+			htCache.requestData(this.handle);
+			int writeAddrHT = htCache.getAddr();
+			int writeAddr = writeAddrHT + this.offset;
+			int tempData;
+			for(int i=0; i<=cache[index][replaceInSet].getMaxOffset(); i++){
+				tempData = cache[index][replaceInSet].getData(i);
+				memory.write(writeAddr+i, tempData);
+			}
+		}
+		//MOESI:
+		MOESIState extMoesi;
+		if(synthesis) extMoesi = checkOtherCaches(index, tag);
+		else extMoesi = MOESIState.INVALID;
+		if(extMoesi != MOESIState.INVALID){
+//		if(extMoesi == MOESIState.OWNED || extMoesi == MOESIState.MODIFIED){
+			ticks+=3;
+			statistics[6]++;
+//			System.out.println("CACHE "+cacheID+ " GETTING RD " + handle+ " " + index +" " + offset +" from " + getFromCache);
+			for(int i=0; i<WORDSPERLINE; i++){
+				cache[index][replaceInSet].setData(i, moesiCaches[getFromCache].getCLData(index, extCacheSet, i));
+			}
+//			updateNotification(selMask, ticks, set, ownerID);
+			updateCaches(selMask, ticks, replaceInSet);
+			cache[index][replaceInSet].setOverhead(tag, 1, 1, moesiCaches[getFromCache].getMaxOffset(index, extCacheSet), selMask);
+			cache[index][replaceInSet].setMoesiState(MOESIState.SHARED);
+		}
+		else{
+			statistics[8]++;
+			int htTicks = htCache.requestData(handle);
+			int htAddr = htCache.getAddr();
+			int phyAddr = htAddr + offset;
+			cache[index][replaceInSet].setOverhead(tag, 1, 0, 0, selMask);
+			int reloadTicks = extMemAcc + 4;
+			for(int i=0; i<WORDSPERLINE; i++){
+				cache[index][replaceInSet].setData(i, memory.read(phyAddr-blockoffset+i));
+				reloadTicks++;
+			}
+			if(reloadTicks > htTicks) ticks = ticks + reloadTicks;
+			else ticks = ticks + htTicks;
+			if(extMoesi == MOESIState.INVALID) cache[index][replaceInSet].setMoesiState(MOESIState.EXCLUSIVE);
+			else cache[index][replaceInSet].setMoesiState(MOESIState.SHARED);
+		}
+		data = cache[index][replaceInSet].getData(blockoffset);
+		setPLRU(index, replaceInSet);
+		return ticks-1;
+	}
+
+	public int writeData(int handle, int offset, int data){
+		statistics[1]++;
+		int selMask = generateCacheAddr(handle, offset);
+		if(selMask == 99) throw new AmidarSimulatorException("ObjCache.writeData() says: \"No valid selMask!\"");
+		boolean foundTag = false;
+		for(int i = 0; i<SETS; i++){
+			if(cache[index][i].getTag() == tag){
+				MOESIState currMOESI = cache[index][i].getMoesiState();
+				if(currMOESI != MOESIState.INVALID){
+					statistics[5]++;
+					cache[index][i].setData(blockoffset, data);
+					int oldMaxOffset = cache[index][i].getMaxOffset();
+					if(oldMaxOffset > blockoffset) cache[index][i].setOverhead(tag, 1, 1, oldMaxOffset, selMask);
+					else cache[index][i].setOverhead(tag, 1, 1, blockoffset, selMask);
+					setPLRU(index, i);							
+					if(currMOESI == MOESIState.EXCLUSIVE) cache[index][i].setMoesiState(MOESIState.MODIFIED);
+					int tt = 0;
+					//========== Original MOESI ======================================================================
+					if(currMOESI == MOESIState.SHARED || currMOESI == MOESIState.OWNED){
+//						System.out.println("CACHE "+ cacheID + " writing " + handle + " " + index + " " + offset);
+						notifyCaches(index, tag);
+						cache[index][i].setMoesiState(MOESIState.MODIFIED);
+					}
+					//================================================================================================
+					
+					//========== Manipulated MOESI ===================================================================
+//					if(currMOESI == MOESIState.OWNED) updateCaches(index, tag, i);
+//					if(currMOESI == MOESIState.SHARED){
+//						MOESIState extMoesi = checkOtherCaches(index, tag);
+//						if(extMoesi == MOESIState.OWNED) moesiCaches[getFromCache].setShared(index, extCacheSet);
+//						updateCaches(index, tag, i);
+//						tt+=3;
+//						cache[index][i].setMoesiState(MOESIState.OWNED);
+//					}
+					//================================================================================================
+					
+					return tt;
+				}
+				foundTag=true;
+			}
+		}
+		if(foundTag) statistics[11]++;
+		statistics[4]++;
+		int ticks = 1;
+		int replaceInSet = decisionPLRU(index);
+		if(replaceInSet == 99) throw new AmidarSimulatorException("Something went wrong with the PLRU decision");
+		MOESIState tempMoesi = cache[index][replaceInSet].getMoesiState();
+		if(tempMoesi == MOESIState.OWNED || tempMoesi == MOESIState.MODIFIED){
+			this.generateHandleOffset(cache[index][replaceInSet].getTag(), index, 0, cache[index][replaceInSet].getSelMask());
+			htCache.requestData(this.handle);
+			int writeAddrHT = htCache.getAddr();
+			int writeAddr = writeAddrHT + this.offset;
+			int tempData;
+			for(int i=0; i<=cache[index][replaceInSet].getMaxOffset(); i++){
+				tempData = cache[index][replaceInSet].getData(i);
+				memory.write(writeAddr+i, tempData);
+			}
+		}
+		//MOESI:
+		MOESIState extMoesi;
+		if(synthesis) extMoesi = checkOtherCaches(index, tag);
+		else extMoesi = MOESIState.INVALID;
+		if(extMoesi != MOESIState.INVALID){
+//		if(extMoesi == MOESIState.OWNED || extMoesi == MOESIState.MODIFIED){
+			ticks+=3;
+			statistics[7]++;
+//			System.out.println("CACHE "+cacheID+ " GETTING WR " + handle+ " "+ index + " " + offset +" from " + getFromCache);
+			for(int i=0; i<WORDSPERLINE; i++){
+				cache[index][replaceInSet].setData(i, moesiCaches[getFromCache].getCLData(index, extCacheSet, i));
+			}
+			int oldMaxOffset = moesiCaches[getFromCache].getMaxOffset(index, extCacheSet);
+			if(oldMaxOffset > blockoffset) cache[index][replaceInSet].setOverhead(tag, 1, 1, oldMaxOffset, selMask);
+			else cache[index][replaceInSet].setOverhead(tag, 1, 1, blockoffset, selMask);			
+			cache[index][replaceInSet].setMoesiState(MOESIState.SHARED);				
+		}
+		else{
+			statistics[9]++;
+			int htTicks = htCache.requestData(handle);
+			int htAddr = htCache.getAddr();
+			int phyAddr = htAddr + offset;
+			int reloadTicks = extMemAcc + 4;
+			for(int i=0; i<WORDSPERLINE; i++){
+				cache[index][replaceInSet].setData(i, memory.read(phyAddr-blockoffset+i));
+				reloadTicks++;
+			}
+			if(reloadTicks > htTicks) ticks = ticks + reloadTicks;
+			else ticks = ticks + htTicks;
+			if(extMoesi == MOESIState.INVALID) cache[index][replaceInSet].setMoesiState(MOESIState.EXCLUSIVE);
+			else cache[index][replaceInSet].setMoesiState(MOESIState.SHARED);
+			cache[index][replaceInSet].setOverhead(tag, 1, 1, blockoffset, selMask);
+		}
+		cache[index][replaceInSet].setData(blockoffset, data);
+		setPLRU(index, replaceInSet);
+		
+		//========== Original MOESI ======================================================================
+		if(extMoesi != MOESIState.INVALID) notifyCaches(index, tag);
+		cache[index][replaceInSet].setMoesiState(MOESIState.MODIFIED);
+		//================================================================================================
+		
+		//========== Manipulated MOESI ===================================================================
+//		if(extMoesi == MOESIState.INVALID) cache[index][replaceInSet].setMoesiState(MOESIState.MODIFIED);
+//		if(extMoesi == MOESIState.SHARED || extMoesi == MOESIState.EXCLUSIVE){
+//			notifyCaches(index, tag);
+//			cache[index][replaceInSet].setMoesiState(MOESIState.MODIFIED);
+//		}
+//		if(extMoesi == MOESIState.OWNED || extMoesi == MOESIState.MODIFIED){
+//			moesiCaches[getFromCache].setShared(index, extCacheSet);
+//			updateCaches(index, tag, replaceInSet);
+//			ticks+=3;
+//			cache[index][replaceInSet].setMoesiState(MOESIState.OWNED);
+//		}
+		//================================================================================================
+		
+		return ticks-1;
+	}
+	
+	private int generateCacheAddr(int handle, int offset){
+		int selMask = 99;
+		if(NEW_CACHE_ADDR) selMask = generateCacheAddrNew2(handle, offset);
+		if(!NEW_CACHE_ADDR) selMask = generateCacheAddrOld(handle, offset);
+		return selMask;
+	}	
+	
+	private int generateCacheAddrOld(int handle, int offset){
+		int selMask = 99;
+		if(offset<=7){
+			blockoffset = offset & 0x7;			
+			int handle8to0 = handle & 0x1FF;
+			index = handle8to0;	
+			long offset31to3 = offset & 0xFFFFFFF8;
+			long handle31to9 = handle & 0xFFFFFE00;
+			tag = (offset31to3 << 20) + (handle31to9 >>> 9);
+			selMask = 0;
+		}		
+		if(8<=offset && offset<=15){
+			blockoffset = offset & 0x7;			
+			int handle7to0 = handle & 0xFF;
+			int offset3 = offset & 0x8;
+			index = (handle7to0 << 1) + (offset3 >>> 3);
+			long offset31to4 = offset & 0xFFFFFFF0;
+			long handle31to8 = handle & 0xFFFFFF00;
+			tag = (offset31to4 << 20) + (handle31to8 >>> 8);
+			selMask = 1;
+		}		
+		if(16<=offset && offset<=31){
+			blockoffset = offset & 0x7;			
+			int handle6to0 = handle & 0x7F;
+			int offset4to3 = offset & 0x18;
+			index = (handle6to0 << 2) + (offset4to3 >>> 3);	
+			long offset31to5 = offset & 0xFFFFFFE0;
+			long handle31to7 = handle & 0xFFFFFF80;
+			tag = (offset31to5 << 20) + (handle31to7 >>> 7);
+			selMask = 2;
+		}		
+		if(32<=offset){
+			blockoffset = offset & 0x7;			
+			int handle5to0 = handle & 0x3F;
+			int offset5to3 = offset & 0x38;
+			index = (handle5to0 << 3) + (offset5to3 >>> 3);		
+			long offset31to6 = offset & 0xFFFFFFC0;
+			long handle31to6 = handle & 0xFFFFFFC0;
+			tag = (offset31to6 << 20) + (handle31to6 >>> 6);
+			selMask = 3;
+		}
+		return selMask;
+	}
+	
+	private int generateCacheAddrNew(int handle, int offset){
+		int selMask = 99;
+		if(offset<=7){
+			blockoffset = offset & 0x7;			
+			int handle8to0 = handle & 0x1FF;
+			index = handle8to0;	
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 0;
+		}		
+		if(8<=offset && offset<=15){
+			blockoffset = offset & 0x7;			
+			int handle7to0 = handle & 0xFF;
+			int offset3 = offset & 0x8;
+			index = (handle7to0 << 1) + (offset3 >>> 3);
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 1;
+		}		
+		if(16<=offset && offset<=31){
+			blockoffset = offset & 0x7;			
+			int handle6to0 = handle & 0x7F;
+			int offset4to3 = offset & 0x18;
+			index = (handle6to0 << 2) + (offset4to3 >>> 3);	
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 2;
+		}		
+		if(32<=offset){
+			blockoffset = offset & 0x7;			
+			int handle5to0 = handle & 0x3F;
+			int offset5to3 = offset & 0x38;
+			index = (handle5to0 << 3) + (offset5to3 >>> 3);		
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 3;
+		}
+		return selMask;
+	}
+	
+	private int generateCacheAddrNew2(int handle, int offset){
+		int selMask = 99;
+		if(offset<=7){
+			blockoffset = offset & 0x7;			
+			int handle8to0 = handle & 0x1FF;
+			index = handle8to0;	
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 0;
+		}		
+		if(8<=offset && offset<=15){
+			blockoffset = offset & 0x7;			
+			int handle7to0 = handle & 0xFF;
+			int offset3 = offset & 0x8;
+			index = (handle7to0 << 1) + (offset3 >>> 3);
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 1;
+		}		
+		if(16<=offset && offset<=31){
+			blockoffset = offset & 0x7;			
+			int handle6to0 = handle & 0x7F;
+			int offset4to3 = offset & 0x18;
+			index = (handle6to0 << 2) + (offset4to3 >>> 3);	
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 2;
+		}		
+		if(32<=offset){
+			blockoffset = offset & 0x7;			
+			int handle5to0 = handle & 0x3F;
+			int offset5to3 = offset & 0x38;
+			index = (handle5to0 << 3) + (offset5to3 >>> 3);		
+			long longHandle = handle;
+			int tmpOffset = offset & 0xFFFFFFF8;
+			tag = (longHandle << 32) + tmpOffset;
+			selMask = 3;
+		}
+		return selMask;
+	}
+	
+	private void generateHandleOffset(long tag, int index, int boff, int selMask){
+		if(NEW_CACHE_ADDR) generateHandleOffsetNew(tag, boff);
+		if(!NEW_CACHE_ADDR) generateHandleOffsetOld(tag, index, boff, selMask);
+	}
+
+	private void generateHandleOffsetOld(long tag, int index, int blockoffset, int selMask){
+		switch(selMask){
+		case 0:
+			int handle31to9 = (int)(tag & 0x7FFFFF);
+			int offset31to3 = (int)(tag >>> 23);
+			int handle8to0 = index;
+			handle = (handle31to9 << 9) + handle8to0;
+			offset = (offset31to3 << 3) + blockoffset;
+			break;
+		case 1:
+			int handle31to8 = (int)(tag & 0xFFFFFF);
+			int offset31to4 = (int)(tag >>> 24);
+			int offset3 = index & 0x1;
+			int handle7to0 = index >>> 1;
+			handle = (handle31to8 << 8) + handle7to0;
+			offset = (offset31to4 << 4) + (offset3 << 3) + blockoffset;
+			break;
+		case 2:
+			int handle31to7 = (int)(tag & 0x1FFFFFF);
+			int offset31to5 = (int)(tag >>> 25);
+			int offset4to3 = index & 0x3;
+			int handle6to0 = index >>> 2;
+			handle = (handle31to7 << 7) + handle6to0;
+			offset = (offset31to5 << 5) + (offset4to3 << 3) + blockoffset;
+			break;
+		case 3:
+			int handle31to6 = (int)(tag & 0x3FFFFFF);
+			int offset31to6 = (int)(tag >>> 26);
+			int offset5to3 = index & 0x7;
+			int handle5to0 = index >>> 3;
+			handle = (handle31to6 << 6) + handle5to0;
+			offset = (offset31to6 << 6) + (offset5to3 << 3) + blockoffset;
+			break;
+		default: throw new AmidarSimulatorException("generateHandleOffset() says: \"No valid selMask!\"");
+		}
+	}
+	
+	private void generateHandleOffsetNew(long tag, int boff){
+		handle = (int) (tag >>> 32);
+		offset = (int) (tag+boff);
+	}
+	
+	private void generateHandleOffsetNew2(long tag, int boff){
+		handle = (int) (tag >>> 32);
+		offset = (int) (tag+boff);
+	}
+	
+	private void setPLRU(int index, int set){
+		switch(set){
+		case 0:
+			plru[index] = plru[index] | 0x6;
+			break;
+		case 1:
+			plru[index] = plru[index] | 0x4;
+			plru[index] = plru[index] & 0x5;
+			break;
+		case 2:
+			plru[index] = plru[index] | 0x1;
+			plru[index] = plru[index] & 0x3;
+			break;
+		case 3:
+			plru[index] = plru[index] & 0x2;
+			break;
+		default:		
+		}
+	}
+	
+	private int decisionPLRU(int index){
+		if(cache[index][0].getValidBit() == 0) return 0;
+		if(cache[index][1].getValidBit() == 0) return 1;
+		if(cache[index][2].getValidBit() == 0) return 2;
+		if(cache[index][3].getValidBit() == 0) return 3;
+		
+		
+		replaced[index] = replaced[index] +4;
+		
+		switch(plru[index]){
+		case 0:
+		case 1:
+//			System.err.println(0);
+			return 0;
+		case 2:
+		case 3:
+//			System.err.println(1);
+			return 1;
+		case 4:
+		case 6:
+//			System.err.println(2);
+			return 2;
+		case 5:
+		case 7:
+//			System.err.println(3);
+			return 3;
+		default:
+			return 99;
+		}
+	}
+	
+	public int getData(){
+		return data;
+	}
+
+	public boolean isReady(){
+		return true;
+	}
+
+	public void invalidate(){}
+	
+	public int getMemoryAccessTime(){
+		return extMemAcc;
+	}
+	
+	public int getCLData(int index, int set, int boff){
+		return cache[index][set].getData(boff);
+	}
+	
+	public void setCLData(int index, int set, int boff, int data){
+		cache[index][set].setData(boff, data);
+	}
+	
+	public int getMaxOffset(int index, int set){
+		return cache[index][set].getMaxOffset();
+	}
+	
+	public int getReturnSet(){
+		return returnSet;
+	}
+	
+	public void setMOESICaches(Cache[] moesiCaches){
+		int cachecount = moesiCaches.length + 1;
+		this.moesiCaches = new Cache[cachecount];
+		System.arraycopy(moesiCaches, 0, this.moesiCaches, 0, moesiCaches.length);
+		if(isHeapCache){
+			for(int i = 0; i<cachecount-1; i++){
+				moesiCaches[i].setHeapCache(this);			
+			}
+			this.setHeapCache(this);
+			cacheID = cachecount-1;			
+		}
+	}
+	
+	public void setHeapCache(Cache objCache){
+		int position = this.moesiCaches.length-1;
+		this.moesiCaches[position] = objCache;
+	}
+	
+	private MOESIState checkOtherCaches(int index, long tag){
+		int sharedCounter = 0;
+		int sharedCache = 0;
+		int sharedCacheSet = 0;
+		for(int i = 0; i<moesiCaches.length; i++){
+			if(i != cacheID){
+				MOESIState cacheResult = moesiCaches[i].checkState(index, tag);
+				if(cacheResult != MOESIState.INVALID && cacheResult != MOESIState.SHARED){
+					getFromCache = i;
+					extCacheSet = moesiCaches[i].getReturnSet();
+					return cacheResult;
+				}
+				if(cacheResult == MOESIState.SHARED){
+					sharedCounter++;
+					sharedCache = i;
+					sharedCacheSet = moesiCaches[i].getReturnSet();
+				}
+			}
+		}
+		if(sharedCounter > 0){
+			getFromCache = sharedCache;
+			extCacheSet = sharedCacheSet;
+			return MOESIState.SHARED;
+		}
+		return MOESIState.INVALID;
+	}
+	
+	public MOESIState checkState(int index, long tag){
+		for(int i = 0; i<SETS; i++){
+			MOESIState moesiState = cache[index][i].getMoesiState();
+			if((cache[index][i].getTag() == tag) && (moesiState != MOESIState.INVALID)){
+				returnSet = i;
+				if(moesiState == MOESIState.EXCLUSIVE) cache[index][i].setMoesiState(MOESIState.SHARED);
+				if(moesiState == MOESIState.MODIFIED) cache[index][i].setMoesiState(MOESIState.OWNED);
+				return moesiState;				
+			}
+		}
+		return MOESIState.INVALID;
+	}
+	
+	private void notifyCaches(int index, long tag){
+		for(int i = 0; i<moesiCaches.length; i++){
+			if(i != cacheID) moesiCaches[i].writeNotification(index, tag);			
+		}
+	}
+	
+	public void writeNotification(int index, long tag){
+		for(int i = 0; i<SETS; i++){
+			if(cache[index][i].getTag() == tag && cache[index][i].getMoesiState() != MOESIState.INVALID){
+//				System.out.prisntln(" CACHE "+ cacheID + " INVALIDATEING INDEX " + index);
+				cache[index][i].setMoesiState(MOESIState.INVALID);	
+			}
+		}
+	}
+	
+	private void updateCaches(int index, long tag, int set){
+//		System.out.println("updateCaches() from Cache"+cacheID);
+		for(int i = 0; i<moesiCaches.length; i++){
+			if(i != cacheID) moesiCaches[i].updateNotification(index, tag, set, cacheID);			
+		}
+	}
+	
+	public void updateNotification(int index, long tag, int set, int ownerID){
+		for(int i = 0; i<SETS; i++){
+			if(cache[index][i].getTag() == tag){
+				MOESIState state = cache[index][i].getMoesiState();
+				if(state != MOESIState.INVALID){
+					if(state != MOESIState.SHARED) throw new AmidarSimulatorException("updateNotification: State has to be \"SHARED\"");
+//					cache[index][i].setMoesiState(MOESIState.SHARED);
+					for(int j=0; j<WORDSPERLINE; j++){
+						cache[index][i].setData(j, moesiCaches[ownerID].getCLData(index, set, j));
+					}
+					int newMaxOffset = moesiCaches[ownerID].getMaxOffset(index, set);
+					cache[index][i].setMaxOffset(newMaxOffset);
+					statistics[12]++;
+				}
+			}
+		}
+	}
+	
+	public void setShared(int index, int set){
+		cache[index][set].setMoesiState(MOESIState.SHARED);
+	}
+	
+	public void notifyHTCaches(int index, int tag){
+		if(synthesis){
+			for(int i = 0; i<moesiCaches.length; i++){
+				if(i != cacheID) moesiCaches[i].writeNotificationHT(index, tag);			
+			}
+		}
+	}
+	
+	public void writeNotificationHT(int index, int tag){
+		htCache.writeNotification(index, tag);
+	}
+	
+	public HandleTableCache getHTCache(){
+		return htCache;
+	}
+	
+//	public int[] getSingleStatistics(){
+//		return statistics;
+//	}
+//	
+//	public int[] getTotalStatistics(){
+//		int[] totalStats = new int[10];
+//		for(int i = 0; i<moesiCaches.length; i++){
+//			int[] temp = moesiCaches[i].getSingleStatistics();
+//			for(int j = 0; j<10; j++){
+//				totalStats[j] = totalStats[j] + temp[j];
+//			}
+//		}
+//		return totalStats;
+//	}
+	
+	public void trace(){
+		Trace cacheTrace = traceManager.getf("caches");
+		double temp = 0;
+		if(isHeapCache){
+			cacheTrace.setPrefix(" heap cache ");
+			cacheTrace.printTableHeader("heap cache:");
+		}
+		else{
+			cacheTrace.setPrefix("cgra cache "+cacheID);
+			cacheTrace.printTableHeader("cgra cache "+cacheID+":");
+		}
+		int read = statistics[0];
+		cacheTrace.println("Read Requests:                      "+read);
+		int write = statistics[1];
+		cacheTrace.println("Write Requests:                     "+write);
+		cacheTrace.println();
+		cacheTrace.println("Read Miss abs.:                     "+statistics[2]);
+		cacheTrace.println("    thereof Tag Match but INVALID:  "+statistics[10]);
+		if(read!=0) temp = ((statistics[2]*10000)/read);
+		else temp = 0;
+		cacheTrace.println("Read Missrate:                      "+temp/100+"%");
+		cacheTrace.println();
+		cacheTrace.println("Write Miss abs.:                    "+statistics[4]);
+		cacheTrace.println("    thereof Tag Match but INVALID:  "+statistics[11]);
+		if(write!=0) temp = ((statistics[4]*10000)/write);
+		else temp = 0;
+		cacheTrace.println("Write Missrate:                     "+temp/100+"%");
+		cacheTrace.println();
+		temp = statistics[8]+statistics[9];
+		cacheTrace.println("Lines Reloaded from Memory:         "+(int)temp);
+		temp = statistics[6]+statistics[7];
+		cacheTrace.println("Lines Reloaded from ext. Cache:     "+(int)temp);
+		cacheTrace.println("    thereof while Read Op.:         "+statistics[6]);
+		cacheTrace.println("    thereof while Write Op.:        "+statistics[7]);
+		cacheTrace.println("Cacheline Updates:                  "+statistics[12]);
+		cacheTrace.println();
+	}
+	
+	public void traceAll(){
+		this.trace();
+		if(synthesis){
+			for(int i = 0; i<moesiCaches.length-1; i++){
+				moesiCaches[i].trace();
+			}
+		}
+	}
+	
+	public void resetStatistics(){
+		statistics = new int[13];
+	}
+	
+	public Cache[] getCaches(){
+		return moesiCaches;
+	}
+	
+	
+	public double usage(){
+		double invalid=0, valid=0;
+		
+		for(int set = 0; set < SETS; set++){
+			for(int index = 0; index < CACHELINES; index++){
+				MOESIState state = cache[index][set].getMoesiState();
+				if(state == MOESIState.INVALID){
+					invalid++;
+				} else {
+					valid++;
+				}
+			}
+		}
+		
+		
+		return(valid/(invalid+valid));
+	}
+	
+	public int[] getState(){
+		int[] ret = new int[CACHELINES];
+		
+		for(int index = 0; index < CACHELINES; index++){
+			ret[index]  = replaced[index];
+			replaced[index] = 0;
+			for(int set = 0; set < SETS; set++){
+				if(cache[index][set].getMoesiState()!= MOESIState.INVALID){
+					ret[index]++;
+				}
+			}
+		}
+		
+		
+		return ret;
+		
+	}
+	
+
+}

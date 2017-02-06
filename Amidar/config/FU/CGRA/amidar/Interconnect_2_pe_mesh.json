@@ -1,0 +1,13 @@
+{
+"name" : "Interconnect",
+"Interconnection":
+	{
+	"0" : [1],
+	"1" : [0]
+	},
+"live_out" :
+	{
+	"0" : true,
+	"1" : true
+	}
+}

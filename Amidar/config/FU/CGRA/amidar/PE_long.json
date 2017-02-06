@@ -1,0 +1,7 @@
+{
+	"name"  : "PE_long",
+	"LADD"  : {},
+	"LSUB"  : {},
+	"LMUL"  : {},
+	"Regfile_size" : 16
+}
